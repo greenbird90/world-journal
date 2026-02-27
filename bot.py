@@ -4,32 +4,33 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# ==============================
-# CONFIG
-# ==============================
-
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 MODEL_NAME = "ProsusAI/finbert"
 
-# ==============================
-# LOAD FINBERT MODEL
-# ==============================
-
-print("Loading FinBERT model...")
-
+print("Memuat model analisis pasar...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-
-print("Model loaded successfully!")
+print("Model siap digunakan!")
 
 # ==============================
-# FUNCTIONS
+# KATA KUNCI PASAR
 # ==============================
 
-def get_global_news():
+KATA_POSITIF = [
+    "rally", "surge", "jump", "soar", "beat",
+    "strong", "record high", "growth", "gain", "optimistic"
+]
+
+KATA_NEGATIF = [
+    "slump", "drop", "plunge", "miss",
+    "weak", "loss", "decline", "recession", "fall", "fear"
+]
+
+
+def ambil_berita_global():
     url = (
         "https://newsapi.org/v2/top-headlines?"
         "category=business&"
@@ -42,55 +43,64 @@ def get_global_news():
     data = response.json()
 
     if data.get("status") != "ok":
-        raise Exception(f"NewsAPI Error: {data}")
+        raise Exception(data)
 
     return data["articles"]
 
 
-def analyze_sentiment(text):
+def analisa_sentimen(text):
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     outputs = model(**inputs)
 
-    probs = F.softmax(outputs.logits, dim=-1)
-    probs = probs.detach().numpy()[0]
-
+    probs = F.softmax(outputs.logits, dim=-1)[0].detach().numpy()
     labels = ["Negative", "Neutral", "Positive"]
-    sentiment = labels[probs.argmax()]
+
+    sentimen = labels[probs.argmax()]
     confidence = float(probs.max())
 
-    return sentiment, confidence
+    return sentimen, confidence
 
 
-def sentiment_to_score(label):
+def boost_kata_kunci(text):
+    text_lower = text.lower()
+    boost = 0
+
+    for kata in KATA_POSITIF:
+        if kata in text_lower:
+            boost += 0.3
+
+    for kata in KATA_NEGATIF:
+        if kata in text_lower:
+            boost -= 0.3
+
+    return boost
+
+
+def skor_dasar(label, confidence):
     if label == "Positive":
-        return 1
+        return 1 * confidence
     elif label == "Negative":
-        return -1
+        return -1 * confidence
     else:
         return 0
 
 
-def send_telegram(message):
+def kirim_telegram(pesan):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
+        "text": pesan,
         "parse_mode": "Markdown"
     }
 
     requests.post(url, json=payload)
 
 
-# ==============================
-# MAIN LOGIC
-# ==============================
-
 def main():
-    print("Fetching news...")
-    articles = get_global_news()
+    articles = ambil_berita_global()
 
-    message = "🌍 *Insight Pasar Global*\n\n"
+    pesan = "🌍 *Ringkasan Sentimen Pasar Global*\n\n"
     total_score = 0
 
     for i, article in enumerate(articles, start=1):
@@ -98,43 +108,53 @@ def main():
         description = article.get("description") or ""
         url = article["url"]
 
-        text_for_analysis = title + ". " + description
+        text = title + ". " + description
 
-        sentiment, confidence = analyze_sentiment(text_for_analysis)
-        score = sentiment_to_score(sentiment)
-        total_score += score
+        sentimen, confidence = analisa_sentimen(text)
+        base_score = skor_dasar(sentimen, confidence)
+        boost = boost_kata_kunci(text)
+        final_score = base_score + boost
 
-        emoji = "🟢" if sentiment == "Positive" else "🔴" if sentiment == "Negative" else "⚖️"
+        total_score += final_score
 
-        message += (
+        if final_score > 0.3:
+            emoji = "🟢"
+            label_id = "Menguat"
+        elif final_score < -0.3:
+            emoji = "🔴"
+            label_id = "Melemah"
+        else:
+            emoji = "⚖️"
+            label_id = "Netral"
+
+        pesan += (
             f"{i}. 💬 {title}\n"
-            f"📊 Sentimen: {emoji} {sentiment} ({confidence:.2f})\n"
+            f"📊 Arah Sentimen: {emoji} {label_id}\n"
+            f"📈 Skor: {final_score:.2f}\n"
             f"🔗 {url}\n\n"
         )
 
     # ==============================
-    # AGGREGATE SUMMARY
+    # INDEKS PASAR
     # ==============================
 
-    if total_score > 0:
-        overall = "🟢 Bullish"
-    elif total_score < 0:
-        overall = "🔴 Bearish"
+    rata_rata = total_score / len(articles)
+    indeks_pasar = int(rata_rata * 100)
+
+    if indeks_pasar > 20:
+        kondisi = "🟢 Pasar Global Cenderung Menguat"
+    elif indeks_pasar < -20:
+        kondisi = "🔴 Pasar Global Cenderung Melemah"
     else:
-        overall = "⚖️ Netral"
+        kondisi = "⚖️ Pasar Global Cenderung Sideways"
 
-    message += "────────────────────\n"
-    message += f"📊 *Ringkasan Global*\n"
-    message += f"Sentimen Hari Ini: {overall}\n"
-    message += f"Skor Agregat: {total_score}\n"
+    pesan += "───────────────\n"
+    pesan += f"📊 *Indeks Panas Pasar: {indeks_pasar}*\n"
+    pesan += f"{kondisi}\n"
 
-    print(message)
-    send_telegram(message)
+    print(pesan)
+    kirim_telegram(pesan)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print("ERROR:", str(e))
-        raise
+    main()
